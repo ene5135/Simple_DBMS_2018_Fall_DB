@@ -1,0 +1,711 @@
+options
+{
+  static = true;
+  DEBUG_PARSER = false;
+  DEBUG_TOKEN_MANAGER = false;
+  IGNORE_CASE = true; //#1 for global case insensitivity, but this makes case insensitivity of identifier too 
+}
+
+////////// main parser class ////////////
+
+PARSER_BEGIN(SimpleDBMSParser)
+
+public class SimpleDBMSParser
+{
+  public static final int PRINT_SYNTAX_ERROR = 0;
+  public static final int PRINT_CREATE_TABLE = 1;
+  public static final int PRINT_DROP_TABLE = 2;
+  public static final int PRINT_DESC = 3;
+  public static final int PRINT_SELECT = 4;
+  public static final int PRINT_INSERT = 5;
+  public static final int PRINT_DELETE = 6;
+  public static final int PRINT_SHOW_TABLES = 7;
+  
+  public static void main(String args[]) throws ParseException
+  {
+    SimpleDBMSParser parser = new SimpleDBMSParser(System.in);
+    System.out.print("DB_2012-11258> ");
+
+    while (true)
+    {
+      try
+      {
+        parser.command();
+        //System.out.print("DB_2012-11258> ");
+      }
+      catch (Exception e)
+      {
+        printMessage(PRINT_SYNTAX_ERROR);
+        SimpleDBMSParser.ReInit(System.in);
+      }
+    }
+  }
+
+  public static void printMessage(int q)
+  {
+    //System.out.print("DB_2012-11258> ");
+    switch(q)
+    {
+      case PRINT_SYNTAX_ERROR:
+      	System.out.println("Syntax error");
+      	break;
+      case PRINT_CREATE_TABLE:
+      	System.out.println("\'CREATE TABLE\' requested");
+      	break;
+      case PRINT_DROP_TABLE:
+      	System.out.println("\'DROP TABLE\' requested");
+      	break;
+      case PRINT_DESC:
+      	System.out.println("\'DESC\' requested");
+      	break;
+      case PRINT_SHOW_TABLES:
+      	System.out.println("\'SHOW TABLES\' requested");
+      	break;
+      case PRINT_SELECT:
+      	System.out.println("\'SELECT\' requested");
+      	break;
+      case PRINT_INSERT:
+      	System.out.println("\'INSERT\' requested");
+      	break;
+      case PRINT_DELETE:
+      	System.out.println("\'DELETE\' requested");
+      	break;
+    }
+    System.out.print("DB_2012-11258> ");
+  }
+}
+
+PARSER_END(SimpleDBMSParser)
+
+///////// SKIP definition /////////////
+
+SKIP : { " " | "\r" | "\t" | "\n" } // to make spaces in a query ignored.
+
+
+///////////// TOKEN definition //////////////
+
+TOKEN : /* Keywords */ //#2 all keywords are defined first. to make keywords don't be recognized as LEGAL_IDENTIFIER
+{
+  < EXIT : "exit" >
+| < INT : "int" >
+| < CHAR : "char" >
+| < DATE : "date" >
+| < CREATE : "create" > //#3 because "create", "table" can not be an identifier, keyword that consists of spaces should be defined like this. To make each word be recognized as keyword independently.
+| < TABLE : "table" >
+//| < CREATE_TABLE : "create table" >	
+//| < CREATE_TABLE : < CREATE > < SPACE > < TABLE > > 
+| < NOT : "not" >
+| < NULL : "null" >
+//| < NOT_NULL : < NOT > " " < NULL > >
+| < NOT_NULL : "not null" >
+| < PRIMARY : "primary" >
+| < FOREIGN : "foreign" >
+| < KEY : "key" >
+//| < PRIMARY_KEY : < PRIMARY > " " < KEY > >
+//| < FOREIGN_KEY : < FOREIGN > " " < KEY > >
+| < PRIMARY_KEY : "primary key" >
+| < FOREIGN_KEY : "foreign key" >
+| < REFERENCES : "references" >
+| < DROP : "drop" >
+//| < DROP_TABLE : < DROP > " " < TABLE > >
+//| < DROP_TABLE : "drop table" >
+| < DESC : "desc" >
+| < SHOW : "show" >
+| < TABLES : "tables" >
+//| < SHOW_TABLES : < SHOW > " " < TABLES > >
+//| < SHOW_TABLES : "show tables" >
+| < SELECT : "select" >
+| < ASTERISK : "*" >
+| < AS : "as" >
+| < FROM : "from" >
+| < WHERE : "where" >
+| < OR : "or" >
+| < AND : "and" >
+| < IS : "is" >
+| < INSERT : "insert" >
+| < INTO : "into" >
+//| < INSERT_INTO : "insert into" >
+| < VALUES : "values" >
+| < DELETE : "delete" >
+//| < DELETE_FROM : "delete from" >
+
+//| < #SPACE : " " >
+
+}
+
+TOKEN :
+{
+  < SEMICOLON : ";" >
+| < LEFT_PAREN : "(" >
+| < RIGHT_PAREN : ")" >
+| < COMMA : "," >
+| < UNDERSCORE : "_" >
+| < INT_VALUE : (< SIGN >)? (< DIGIT >)+>
+| < SIGN : "+" | "-" >
+| < DIGIT : [ "0"-"9" ] >
+| < LEGAL_IDENTIFIER : < ALPHABET > (< ALPHABET > | < UNDERSCORE >)* >
+| < ALPHABET : [ "a"-"z", "A"-"Z" ] >
+| < PERIOD : "." >
+| < COMPARISON_SIGNS : "<" | ">" | "=" | "<=" | ">=" | "!=" > // #5 add inequality signs and equality sign to token 
+| < QUOTE : "'" >
+| < NON_QUOTE_SPECIAL_CHARACTERS : "`"|"~"|"!"|"@"|"#"|"$"|"%"|"^"|"&"|"*"|"("|")"|"-"|"_"|"="|"+"|"["|"]"|"{"|"}"|"\\"|";"|":"|"<"|","|"."|">"|"/"|"?"|"|" >
+| < NON_QUOTE_CHARACTERS : < DIGIT > | < ALPHABET > | < NON_QUOTE_SPECIAL_CHARACTERS > | " " > 
+| < CHAR_STRING : < QUOTE > (< NON_QUOTE_CHARACTERS >)* < QUOTE > >
+| < DATE_VALUE : < NNNN > "-" < NN > "-" < NN > > 
+| < NNNN : < DIGIT > < DIGIT > < DIGIT > < DIGIT > >
+| < NN : < DIGIT > < DIGIT > >
+//| < #SPACE : " " > #6 this line cause error. duplicate with SKIP definition. so use " ", instead of < SPACE >
+
+}
+
+///////////////// Query rules ////////////////
+
+/*
+
+<COMMAND> ::= <QUERY LIST>
+| exit <SEMICOLON>
+<QUERY LIST> ::= (<QUERY> <SEMICOLON>)+
+<QUERY> ::= <CREATE TABLE QUERY>
+| <DROP TABLE QUERY>
+| <DESC QUERY>
+| <SELECT QUERY>
+| <INSERT QUERY>
+| <DELETE QUERY>
+| <SHOW TABLES QUERY>
+<SEMICOLON> ::= ;
+
+*/
+
+void command() :
+{}
+{
+  queryList()
+| (
+    < EXIT >
+    < SEMICOLON >
+    {
+      System.exit(0);
+    }
+  ) 
+}
+
+void queryList() :
+{
+  int q;
+}
+{
+  (
+    q = query()
+    < SEMICOLON >
+    {
+      printMessage(q);
+    }
+  )+
+}
+
+int query() : // #4 Query :<CREATE TABLE QUERY>| <DROP TABLE QUERY>| <DESC QUERY>| <SELECT QUERY>| <INSERT QUERY>| <DELETE QUERY>| <SHOW TABLES QUERY>
+{
+  int q; // used for switch statement.
+}
+{
+  (    (
+      createTableQuery()
+      {
+        q = PRINT_CREATE_TABLE;
+      }
+  	)
+  	|
+ 	(  	  dropTableQuery()
+  	  {
+  	    q = PRINT_DROP_TABLE;
+ 	  }
+ 	)
+	|
+	(	  descQuery()
+	  {
+	    q = PRINT_DESC;
+	  }
+	)
+	|
+	(	  showTablesQuery()
+	  {
+	    q = PRINT_SHOW_TABLES;
+	  }
+	)
+	|
+	(
+	  selectQuery()
+	  {
+	    q = PRINT_SELECT;
+	  }
+	)
+	|
+	(
+	  insertQuery()
+	  {
+	    q = PRINT_INSERT;
+	  }
+	)
+	|
+	(
+	  deleteQuery()
+	  {
+	    q = PRINT_DELETE;
+	  }
+	)       
+  )
+  (
+    {
+      return q;
+    }
+  )
+}
+
+/////////// delete rules ///////////
+/*
+
+<DELETE QUERY> ::= delete from <TABLE NAME> [<WHERE CLAUSE>]
+
+*/
+
+void deleteQuery() :
+{}
+{
+  < DELETE >
+  < FROM >
+  tableName()
+  (	whereClause()
+  )?
+}
+
+/////////// insert rules ////////////////
+/*
+
+<INSERT QUERY> ::= insert into <TABLE NAME> <INSERT COLUMNS AND SOURCE>
+<INSERT COLUMNS AND SOURCE> ::= [<COLUMN NAME LIST>] <VALUE LIST>
+<VALUE LIST> ::= values <LEFT PAREN> <VALUE> (<COMMA> <VALUE>)* <RIGHT PAREN>
+<VALUE> ::= null
+| <COMPARABLE VALUE>
+
+*/
+void insertQuery() :
+{}
+{
+  < INSERT >
+  < INTO >
+  tableName()
+  insertColumnsAndSource()
+}
+
+void insertColumnsAndSource() :
+{}
+{
+  (
+    columnNameList()  )?
+  valueList()
+}
+
+void valueList() :
+{}
+{
+  < VALUES >
+  < LEFT_PAREN >
+  value()
+  (	< COMMA >
+	value()
+  )*
+  < RIGHT_PAREN >
+}
+
+void value() :
+{}
+{
+  < NULL >
+| comparableValue()
+}
+
+/////////// select rules /////////////////
+/*
+
+<SELECT QUERY> ::= select <SELECT LIST> <TABLE EXPRESSION>
+<SELECT LIST> ::= *
+| <SELECTED COLUMN> (<COMMA> <SELECTED COLUMN>)*
+<SELECTED COLUMN> ::= [<TABLE NAME> <PERIOD>] <COLUMN NAME> [as <COLUMN NAME>]
+<PERIOD> ::= .
+<TABLE EXPRESSION> ::= <FROM CLAUSE> [<WHERE CLAUSE>]
+<FROM CLAUSE> ::= from <TABLE REFERENCE LIST>
+<TABLE REFERENCE LIST> ::= <REFERED TABLE> (<COMMA> <REFERED TABLE>)*
+<REFERED TABLE> ::= <TABLE NAME> [as <TABLE NAME>]
+<WHERE CLAUSE> ::= where <BOOLEAN VALUE EXPRESSION>
+<BOOLEAN VALUE EXPRESSION> ::= <BOOLEAN TERM> ( or <BOOLEAN TERM>)*
+<BOOLEAN TERM> ::= <BOOLEAN FACTOR>( and <BOOLEAN FACTOR> )*
+<BOOLEAN FACTOR> ::= [not] <BOOLEAN TEST>
+<BOOLEAN TEST> ::= <PREDICATE>
+| <PARENTHESIZED BOOLEAN EXPRESSION>
+<PARENTHESIZED BOOLEAN EXPRESSION> ::= <LEFT PAREN> <BOOLEAN VALUE EXPRESSION> <RIGHT PAREN>
+<PREDICATE> ::= <COMPARISON PREDICATE>
+| <NULL PREDICTE>
+<COMPARISON PREDICATE> ::= <COMP OPERAND> <COMP OP> <COMP OPERAND>
+<COMP OPERAND> ::= <COMPARABLE VALUE>
+| [<TABLE NAME> <PERIOD>] <COLUMN NAME>
+<COMP OP> ::= < | > | = | >= | <= | !=
+<COMPARABLE VALUE> ::= <INT VALUE>
+| <CHAR STRING>
+| <DATE VALUE>
+<NULL PREDICATE> ::= [<TABLE NAME> <PERIOD>] <COLUMN NAME> <NULL OPERATION>
+<NULL OPERATION> ::= is [not] null
+
+*/
+void selectQuery() :
+{}
+{
+  < SELECT >
+  selectList()
+  tableExpression()
+}
+
+void selectList() :
+{}
+{
+  < ASTERISK >
+| (
+    selectedColumn()
+    (
+      < COMMA >
+      selectedColumn()
+    )*
+  )
+}
+
+void selectedColumn() :
+{}
+{
+  (
+    LOOKAHEAD(2) //#7 choice confilict, <LEGAL_IDENTIFIER>.... using LOOKAHEAD, solve this.
+    tableName()
+    < PERIOD >  )?
+  columnName()
+  (	< AS >
+	columnName()
+  )?
+}
+
+void tableExpression() :
+{}
+{
+  fromClause()
+  (
+    whereClause()  )? 
+}
+
+void fromClause() :
+{}
+{
+  < FROM >
+  tableReferenceList()
+}
+
+void tableReferenceList() :
+{}
+{
+  referedTable()
+  (	< COMMA >
+	referedTable()
+  )*
+}
+
+void referedTable() :
+{}
+{
+  tableName()
+  (	< AS >
+	tableName()
+  )?
+}
+
+void whereClause() :
+{}
+{
+  < WHERE >
+  booleanValueExpression()
+}
+
+void booleanValueExpression() :
+{}
+{
+  booleanTerm()
+  (
+    < OR >
+    booleanTerm()  )*
+}
+
+void booleanTerm() :
+{}
+{
+  booleanFactor()
+  (
+    < AND >
+    booleanFactor()  )*
+}
+
+void booleanFactor() :
+{}
+{
+  (
+    < NOT >  )?
+  booleanTest()
+}
+
+void booleanTest() :
+{}
+{
+  predicate()
+| parenthesizedBooleanExpression()
+
+}
+
+void parenthesizedBooleanExpression() :
+{}
+{
+  < LEFT_PAREN >
+  booleanValueExpression()
+  < RIGHT_PAREN >
+}
+
+void predicate() :
+{}
+{
+  LOOKAHEAD(4) // #8 choice conflict <LEGAL_IDENTIFIER> <PERIOD> ... , to solve this, use LOOKAHEAD(3)
+  comparisonPredicate()
+| nullPredicate()
+}
+
+void comparisonPredicate() :
+{}
+{
+  compOperand()
+  compOp()
+  compOperand()
+}
+
+void compOperand() :
+{}
+{
+  
+  comparableValue()
+| (
+    (
+      LOOKAHEAD(2) //#7
+      tableName()
+      < PERIOD >
+    )?
+    columnName()
+  )
+}
+
+void compOp() :
+{}
+{
+  < COMPARISON_SIGNS >
+}
+
+void comparableValue() :
+{}
+{
+  < INT_VALUE >
+| < CHAR_STRING >
+| < DATE_VALUE >
+
+}
+
+void nullPredicate() :
+{}
+{
+  
+  (
+    LOOKAHEAD(2) //#7	tableName()
+	< PERIOD >
+  )?
+  columnName()
+  nullOperation()
+}
+
+void nullOperation() :
+{}
+{
+//  < IS >
+//  (
+//	< NOT >
+//  )?
+//  < NULL >  #9 this definition makes conflict with < NOT_NULL > token. 
+
+  < IS >
+  (    < NOT_NULL >
+  | < NULL >
+  )
+}
+
+/////////// show table rules ///////////
+/*
+
+<SHOW TABLES QUERY> ::= show tables
+
+*/
+void showTablesQuery() :
+{}
+{
+  < SHOW >
+  < TABLES >
+}
+
+/////////// desc rules ////////////
+/*
+
+<DESC QUERY> ::= desc <TABLE NAME>
+
+*/
+void descQuery() :
+{}
+{
+  < DESC >
+  tableName()
+}
+
+/////////// drop table rules /////////////
+/*
+
+<DROP TABLE QUERY> ::= drop table <TABLE NAME>
+
+*/
+void dropTableQuery() :
+{}
+{
+  < DROP >
+  < TABLE >
+  tableName()
+}
+
+/////////// create table rules ///////////////
+/*
+
+<CREATE TABLE QUERY> ::= create table <TABLE NAME> <TABLE ELEMENT LIST>
+<TABLE ELEMENT LIST> ::= <LEFT PAREN> <TABLE ELEMENT> (<COMMA> <TABLE ELEMENT>)* <RIGHT PAREN>
+<TABLE ELEMENT> ::= <COLUMN DEFINITION>
+| <TABLE CONSTRAINT DEFINITION>
+<COLUMN DEFINITION> ::= <COLUMN NAME> <DATA TYPE> [not null]
+<TABLE CONSTRAINT DEFINITION> ::= <PRIMARY KEY CONSTRAINT>
+| <REFERENTIAL CONSTRAINT>
+<PRIMARY KEY CONSTRAINT> ::= primary key <COLUMN NAME LIST>
+<REFERENTIAL CONSTRAINT> ::= foreign key <COLUMN NAME LIST> references <TABLE NAME> <COLUMN NAME LIST>
+<COLUMN NAME LIST> ::= <LEFT PAREN> <COLUMN NAME> (<COMMA> <COLUMN NAME>)* <RIGHT PAREN>
+<DATA TYPE> ::= int
+| char <LEFT PAREN> <INT VALUE> <RIGHT PAREN>
+| date
+<TABLE NAME> ::= <LEGAL IDENTIFIER>
+<COLUMN NAME> ::= <LEGAL IDENTIFIER>
+<LEGAL IDENTIFIERS> ::= <ALPHABET> (<ALPHABET> | <UNDERSCORE>)*
+<UNDERSCORE> ::= _
+<LEFT PAREN> ::= (
+<RIGHT PAREN> ::= )
+<COMMA> ::= ,
+
+*/
+void createTableQuery() :
+{}
+{
+  < CREATE >
+  < TABLE >
+  tableName()
+  tableElementList()
+}
+
+void tableElementList() :
+{}
+{
+  < LEFT_PAREN >
+  tableElement()
+  (
+    < COMMA >
+    tableElement()
+  )*
+  < RIGHT_PAREN >
+}
+
+void tableElement() :
+{
+}
+{
+  columnDefinition()
+| tableConstraintDefinition()
+}
+
+void columnDefinition() :
+{}
+{
+  columnName()
+  dataType()
+  (
+    < NOT_NULL >
+  )?
+}
+
+void tableConstraintDefinition() :
+{}
+{
+  primaryKeyConstraint()
+| referentialConstraint()
+}
+
+void primaryKeyConstraint() :
+{}
+{
+  < PRIMARY_KEY >
+  columnNameList()
+}
+
+void referentialConstraint() :
+{}
+{
+  < FOREIGN_KEY >
+  columnNameList()
+  < REFERENCES >
+  tableName()
+  columnNameList()
+}
+
+void columnNameList() :
+{}
+{
+  < LEFT_PAREN >
+  columnName()
+  (
+    < COMMA >
+    columnName()
+  )*
+  < RIGHT_PAREN >
+}
+
+void dataType() :
+{}
+{
+  < INT >
+| (
+    < CHAR >
+    < LEFT_PAREN >
+    < INT_VALUE >
+    < RIGHT_PAREN >
+  )
+| < DATE >
+}
+
+void tableName() :
+{}
+{
+  < LEGAL_IDENTIFIER >
+}
+
+void columnName() :
+{}
+{
+  < LEGAL_IDENTIFIER >
+}

@@ -1,0 +1,1584 @@
+options
+{
+  static = true;
+  DEBUG_PARSER = false;
+  DEBUG_TOKEN_MANAGER = false;
+  IGNORE_CASE = true; //#1 for global case insensitivity, but this makes case insensitivity of identifier too 
+}
+
+////////// main parser class ////////////
+
+PARSER_BEGIN(SimpleDBMSParser)
+
+// import
+
+import com.sleepycat.je.Database;
+import com.sleepycat.je.DatabaseException;
+import com.sleepycat.je.DatabaseConfig;
+import com.sleepycat.je.Cursor;
+import com.sleepycat.je.DatabaseEntry;
+import com.sleepycat.je.Environment;
+import com.sleepycat.je.EnvironmentConfig;
+import com.sleepycat.je.LockMode;
+import com.sleepycat.bind.serial.SerialBinding;
+import com.sleepycat.bind.serial.StoredClassCatalog;
+import com.sleepycat.bind.EntryBinding;
+import com.sleepycat.je.OperationStatus;
+
+import java.io.File;
+import java.io.Serializable;
+import java.io.UnsupportedEncodingException;
+import java.util.ArrayList;
+
+/* PRJ2 #7 : My table, attr structure */
+  class Table implements Serializable
+  {
+	String tableName;
+	ArrayList<Attribute> attributes;
+	ArrayList<String> referencedBy; // name of table that reference this table.
+	ArrayList<ForeignKey> FKs;
+	ArrayList<String> PK;
+
+	Table()
+	{
+	  tableName = null;
+	  attributes = new ArrayList<Attribute>();
+	  referencedBy = new ArrayList<String>();
+	  FKs = new ArrayList<ForeignKey>();
+	  PK = new ArrayList<String>();
+	}
+
+	void markPKsNotNull()
+	{
+	  for(String PKCursor : PK)
+	  {
+		for(Attribute attrCursor : attributes)
+		{
+		  if(PKCursor.equalsIgnoreCase(attrCursor.getAttrName()))
+		  	attrCursor.setNullable(false);
+		}
+	  }
+	}
+	Boolean containsCaseInsen(ArrayList<String> arrayList, String target)
+    {
+	  Boolean result = false;
+	  for(String cursor : arrayList)
+	  {
+	    result = result || cursor.equalsIgnoreCase(target);
+	  }
+	  return result;
+    }
+	Boolean containsAttr(String attrName)
+	{
+	  Boolean result = false;
+	  for(Attribute cursor : attributes)
+	  {
+		if(cursor.getAttrName().equalsIgnoreCase(attrName))
+		  result = true;
+	  }
+	  return result;
+	}
+	ArrayList<String> getPK()
+	{
+	  return PK;
+	}
+	void addToRefBy(String referencingTableName)
+	{
+	  referencedBy.add(referencingTableName);
+	}
+	ArrayList<ForeignKey> getFKs()
+	{
+	  return FKs;
+	}
+	void deleteFromRefBy(String target)
+	{
+	  referencedBy.remove(target);
+	}
+	Boolean isFK(String attrName)
+	{
+	  Boolean result = false;
+	  for(ForeignKey cursor : FKs)
+	  {
+	    result = result || containsCaseInsen(cursor.getAttrs(), attrName);
+	  }
+	  return result;
+	}
+	Boolean isPK(String attrName)
+	{
+	  return containsCaseInsen(PK, attrName);
+	}
+	ArrayList<Attribute> getAttrs()
+	{
+	  return attributes;
+	}
+	void addFK(ForeignKey newFK)
+	{
+	  FKs.add(newFK);
+	}
+	void addPKs(ArrayList<String> newPKs)
+	{
+	  PK.addAll(newPKs);
+	}
+	String getTableName()
+	{
+	  return tableName;
+	}
+	Boolean isReferenced()
+	{
+	  return (!referencedBy.isEmpty());
+	}
+	void setTableName(String argTableName)
+	{
+	  tableName = argTableName;
+	}
+	void addAttr(Attribute attr)
+	{
+	  attributes.add(attr);
+	}
+  }
+
+  class Attribute implements Serializable
+  {
+	String tableName;
+	String attrName;
+	String type;
+	Boolean nullable;
+
+	Attribute()
+	{
+	  tableName = null;
+	  attrName = null;
+	  type = null;
+	  nullable = true;
+	}
+	Attribute(String argTN, String argAN, String argType, Boolean argNullable)
+	{
+	  tableName = argTN;
+	  attrName = argAN;
+	  type = argType;
+	  nullable = argNullable;
+	}
+
+	String getAttrName()
+	{
+	  return attrName;
+	}
+	String getType()
+	{
+	  return type;
+	}
+	Boolean getNullable()
+	{
+	  return nullable;
+	}
+	void setTableName(String argTN)
+	{
+	  tableName = argTN;
+	}
+	void setAttrName(String argAN)
+	{
+	  attrName = argAN;
+	}
+	void setType(String argType)
+	{
+	  type = argType;
+	}
+	void setNullable(Boolean argNullable)
+	{
+	  nullable = argNullable;
+	}
+  }
+
+  class ForeignKey implements Serializable // Foreign key : list to list referencing
+  {
+	ArrayList<String> referencingAttrs;
+	String referencedTable;
+	ArrayList<String> referencedAttrs;
+
+	ForeignKey(ArrayList<String> argReferencing, String argReferencedTable, ArrayList<String> argReferenced)
+	{
+	  referencingAttrs = argReferencing;
+	  referencedTable = argReferencedTable; 
+	  referencedAttrs = argReferenced; 
+	}
+
+	String getRefTableName()
+	{
+	  return referencedTable;
+	}
+	ArrayList<String> getAttrs()
+	{
+	  return referencingAttrs;
+	}
+  }
+
+
+////////////// PRJ2 #9 : need these classes to execute column definition before table constraint definition for any order of input statement
+  class TableElementList
+  {
+	ArrayList<ColumnDef> columnDefList;
+	ArrayList<TableConstraintDef> tableConstraintDefList;
+
+	TableElementList()
+	{
+	  columnDefList = new ArrayList<ColumnDef>();
+	  tableConstraintDefList = new ArrayList<TableConstraintDef>();
+	}
+
+	ArrayList<TableConstraintDef> getConstDefList()
+	{
+	  return tableConstraintDefList;
+	}
+	ArrayList<ColumnDef> getColumnDefList()
+	{
+	  return columnDefList;
+	}
+	void addColumnDef(ColumnDef newDef)
+	{
+	  columnDefList.add(newDef);
+	}
+	void addTableConstraintDef(TableConstraintDef newDef)
+	{
+	  tableConstraintDefList.add(newDef);
+	}
+  }
+
+  class ColumnDef
+  {
+	String columnName;
+	String dataType;
+	Boolean nullable;
+
+	ColumnDef(String argColName, String argType, Boolean argNullable)
+	{
+	  columnName = argColName;
+	  dataType = argType;
+	  nullable = argNullable;
+	}
+
+	String getColumnName()
+	{
+	  return columnName;
+	}
+	String getDataType()
+	{
+	  return dataType;
+	}
+	Boolean getNullable()
+	{
+	  return nullable;
+	}
+  }
+
+  class TableConstraintDef
+  {
+	String type; // "FK" or "PK"
+	ArrayList<String> attrs;
+	String referencedTable; // for only FK
+	ArrayList<String> referencedAttrs; // for only FK
+
+	TableConstraintDef(String argType, ArrayList<String> argAttrs)
+	{
+	  type = argType;
+	  attrs = argAttrs;
+	  referencedTable = null;
+	  referencedAttrs = null;
+	}
+	TableConstraintDef(String argType, ArrayList<String> argAttrs, String argReferencedTable, ArrayList<String> argReferencedAttrs)
+	{
+	  type = argType;
+	  attrs = argAttrs;
+	  referencedTable = argReferencedTable;
+	  referencedAttrs = argReferencedAttrs;
+	}
+
+	String getRefTableName()
+	{
+	  return referencedTable;
+	}
+	ArrayList<String> getRefAttrs()
+	{
+	  return referencedAttrs;
+	}
+	ArrayList<String> getAttrs()
+	{
+	  return attrs;
+	}
+	String getType()
+	{
+	  return type;
+	}
+  }
+
+public class SimpleDBMSParser
+{
+  public static final int PRINT_SYNTAX_ERROR = 0;
+  public static final int PRINT_CREATE_TABLE = 1;
+  public static final int PRINT_DROP_TABLE = 2;
+  public static final int PRINT_DESC = 3;
+  public static final int PRINT_SELECT = 4;
+  public static final int PRINT_INSERT = 5;
+  public static final int PRINT_DELETE = 6;
+  public static final int PRINT_SHOW_TABLES = 7;
+
+  // Environment & Database declarations
+  public static Environment myDbEnvironment = null;
+  public static Database myDatabase = null;
+  public static Database myClassDb = null;
+  public static Cursor cursor = null;
+  public static StoredClassCatalog scc = null;
+  public static EntryBinding entryBinding = null;
+  public static DatabaseEntry foundKey = null;
+  public static DatabaseEntry foundData = null;
+
+  
+  public static void main(String args[]) throws ParseException
+  {
+	/* OPENING DB */
+
+	// Open Database Environment or if not, create one.
+	EnvironmentConfig envConfig = new EnvironmentConfig();
+	envConfig.setAllowCreate(true);
+	myDbEnvironment = new Environment(new File("db/"), envConfig);
+
+	// Open Database or if not, create one.
+	// Initializations
+	DatabaseConfig dbConfig = new DatabaseConfig();
+	dbConfig.setAllowCreate(true);
+	dbConfig.setSortedDuplicates(false);
+	dbConfig.setDeferredWrite(true); // PRJ2 #1 : set this option to use sync() function.
+	myDatabase = myDbEnvironment.openDatabase(null, "sampleDatabase", dbConfig);
+	dbConfig.setSortedDuplicates(false);
+    myClassDb = myDbEnvironment.openDatabase(null, "classDb", dbConfig);
+    scc = new StoredClassCatalog(myClassDb);
+	entryBinding = new SerialBinding(scc,Table.class); // PRJ2 #0 : My DB stores <String(=key), Object(=value)>. Techniques to store object in value. using binding
+	cursor = myDatabase.openCursor(null, null);
+	foundKey = new DatabaseEntry();
+	foundData = new DatabaseEntry();
+	
+    SimpleDBMSParser parser = new SimpleDBMSParser(System.in);
+    System.out.print("DB_2012-11258> ");
+
+    while (true)
+    {
+      try
+      {
+        parser.command();
+      }
+      catch (Exception e)
+      {
+        printMessage(PRINT_SYNTAX_ERROR);
+        SimpleDBMSParser.ReInit(System.in);
+      }
+    }
+  }
+
+  
+/* PRJ2 #2 : this function put <Key(=String), Object > into DB. */
+  public static void putObjectEntry(String keyString, Object obj) throws Exception
+  {
+	try {
+	  DatabaseEntry key;
+	  DatabaseEntry data;
+
+	  key = new DatabaseEntry(keyString.getBytes("UTF-8"));
+	  data = new DatabaseEntry();
+
+	  entryBinding.objectToEntry(obj,data); // PRJ2 #0 : My DB stores <String(=key), Object(=value)>. Techniques to store object in value.
+
+	  if(tableExist(keyString))
+		// this exception must not be executed
+	  	throw new Exception("Create table has failed: table with the same name already exists"); 
+	  myDatabase.putNoOverwrite(null, key, data);
+	  myDatabase.sync(); // PRJ2 #1 : To save db file immediately.
+	} catch (DatabaseException de) {
+	  de.printStackTrace();
+	} catch (UnsupportedEncodingException e) {
+	  e.printStackTrace();
+	}
+  }
+
+//PRJ2 #6 : requested message should be removed
+  public static void printMessage(int q)
+  {
+    //System.out.print("DB_2012-11258> ");
+    switch(q)
+    {
+      case PRINT_SYNTAX_ERROR:
+      	System.out.println("Syntax error");
+      	break;
+      	/*
+      case PRINT_CREATE_TABLE:
+      	System.out.println("\'CREATE TABLE\' requested");
+      	break;
+      case PRINT_DROP_TABLE:
+      	System.out.println("\'DROP TABLE\' requested");
+      	break;
+      case PRINT_DESC:
+      	System.out.println("\'DESC\' requested");
+      	break;
+      case PRINT_SHOW_TABLES:
+	    System.out.println("\'SHOW TABLES\' requested");
+      	break;
+      	*/
+      case PRINT_SELECT:
+      	System.out.println("\'SELECT\' requested");
+      	break;
+      case PRINT_INSERT:
+      	System.out.println("\'INSERT\' requested");
+      	break;
+      case PRINT_DELETE:
+      	System.out.println("\'DELETE\' requested");
+      	break;
+    }
+    System.out.print("DB_2012-11258> ");
+  }
+
+  static Boolean containsCaseInsen(ArrayList<String> arrayList, String target)
+  {
+	Boolean result = false;
+	for(String cursor : arrayList)
+	{
+	  result = result || cursor.equalsIgnoreCase(target);
+	}
+	return result;
+  }
+
+  static Boolean getTableFromDB(DatabaseEntry theKey, DatabaseEntry theData) // case insensitive get. not found = null
+  {
+    Boolean result = false;
+	if (cursor.getFirst(foundKey, foundData, LockMode.DEFAULT) == OperationStatus.NOTFOUND)
+	{ // empty db case
+	  return result;
+	}
+	else
+	{
+	  do // traverse entire db
+	  {     
+	    String res_key = null;
+	    String target = null;
+	    try {
+	      		target = new String(theKey.getData(), "UTF-8");
+	   			res_key = new String(foundKey.getData(), "UTF-8");
+		} catch (UnsupportedEncodingException e) {
+			e.printStackTrace();
+		}
+	    if(res_key.equalsIgnoreCase(target))
+	    { 
+	      entryBinding.objectToEntry((Table) entryBinding.entryToObject(foundData),theData);
+	      try { theKey.setData(res_key.getBytes("UTF-8")); }
+	      catch (UnsupportedEncodingException e) {	e.printStackTrace(); }
+	      result = true;
+	      return result;
+	    }  
+	  } while (cursor.getNext(foundKey, foundData,LockMode.DEFAULT) == OperationStatus.SUCCESS);
+	}
+	return result;
+  }
+
+  static void addAllReferencedBy(String tableName, TableElementList definitionList) throws Exception
+  {
+    ArrayList<TableConstraintDef> tableConstraintDefList = definitionList.getConstDefList();
+	String refTableName;
+	ArrayList<String> keyAttrs, refAttrs;
+
+	for (TableConstraintDef cursor : tableConstraintDefList)
+	{
+	  if(cursor.getType().equals("FK"))
+	  {
+		keyAttrs = cursor.getAttrs();
+	    refTableName = cursor.getRefTableName();
+	    refAttrs = cursor.getRefAttrs();
+	    
+	    DatabaseEntry theKey = null;
+	    try {
+	    	theKey = new DatabaseEntry(refTableName.getBytes("UTF-8"));
+	    } catch (UnsupportedEncodingException e) {
+	    	e.printStackTrace();
+	    }
+        DatabaseEntry theData = new DatabaseEntry();
+        if(!getTableFromDB(theKey, theData)) // not found
+        {
+          //this can not be reached
+          throw new Exception("Create table has failed: foreign key references non existing table");
+        }
+        else // found
+        {
+   	      Table retrievedTable = (Table) entryBinding.entryToObject(theData);
+		  
+	      retrievedTable.addToRefBy(tableName);
+		  entryBinding.objectToEntry(retrievedTable,theData); 
+	 	  myDatabase.put(null, theKey, theData); // overwrite updated record
+	 	  myDatabase.sync();
+        }
+	  }
+	}
+  }
+
+  static Boolean tableExist(String tableName)
+  {
+	DatabaseEntry theKey = null;
+	try {
+		theKey = new DatabaseEntry(tableName.getBytes("UTF-8"));
+	} catch (UnsupportedEncodingException e) {
+		e.printStackTrace();
+	}
+    DatabaseEntry theData = new DatabaseEntry();
+    return getTableFromDB(theKey, theData);
+  }
+
+  static void deleteReference(Table table)
+  {
+    String referencedTableName;
+    for(ForeignKey cursor : table.getFKs())
+    {
+      referencedTableName = cursor.getRefTableName();
+      DatabaseEntry theKey = null;
+	  try {
+	  	theKey = new DatabaseEntry(referencedTableName.getBytes("UTF-8"));
+	  } catch (UnsupportedEncodingException e) {
+	  	e.printStackTrace();
+	  }
+      DatabaseEntry theData = new DatabaseEntry();
+      if(!getTableFromDB(theKey, theData)) // not found
+      {
+        System.out.println("Fatal error : code cannot reach here(deleteReference())");
+      }
+      else // found
+      {
+   	    Table retrievedTable = (Table) entryBinding.entryToObject(theData);
+	    retrievedTable.deleteFromRefBy(table.getTableName());
+	    entryBinding.objectToEntry(retrievedTable,theData); 
+	 	myDatabase.put(null, theKey, theData); // overwrite updated record
+	 	myDatabase.sync();
+      }
+    }
+  }
+
+/* PRJ2 #12 : this function check whether the attr is key or not and return the string like PRI, FOR, PRI/FOR
+*/
+  static String whatKey(Table table, String attrName)
+  {
+	String result = new String("");
+	String slash = new String("");
+	if(table.isPK(attrName))
+	{
+	  result = result + "PRI";
+	  slash = "/";
+	}
+	if(table.isFK(attrName))
+	  result = result + slash + "FOR";
+
+	return result;
+  }
+
+/* PRJ2 #10 : this function add new columns to table, traversing column definition list */
+  static Table makeColumns(Table newTable, TableElementList definitionList) throws Exception
+  {
+	ArrayList<ColumnDef> columnDefList = definitionList.getColumnDefList();
+	Attribute newAttr;
+	String tableName = newTable.getTableName();
+	String newColumnName, newColumnType;
+	Boolean newColumnNullable;
+	
+	for (ColumnDef cursor : columnDefList)
+	{
+	  newColumnName = cursor.getColumnName();
+	  newColumnType = cursor.getDataType();
+	  newColumnNullable = cursor.getNullable();
+
+	  for(Attribute attrCursor : newTable.getAttrs()) // check dup col
+	  {
+	    if(attrCursor.getAttrName().equalsIgnoreCase(newColumnName))
+	      throw new Exception("Create table has failed: column definition is duplicated");
+	  }
+	  if(newColumnType.equals("errorType"))
+	    throw new Exception("Char length should be over 0");
+	  
+	  newAttr = new Attribute(tableName, newColumnName, newColumnType, newColumnNullable);
+	  newTable.addAttr(newAttr);
+	}
+
+	return newTable;
+  }
+
+/* PRJ2 #11 : this function apply new constraints to table, traversing column definition list */
+  static Table applyConstraints(Table newTable, TableElementList definitionList) throws Exception
+  {
+	ArrayList<TableConstraintDef> tableConstraintDefList = definitionList.getConstDefList();
+	ForeignKey newForeignKey;
+	String refTableName;
+	ArrayList<String> keyAttrs, refAttrs;
+
+	for (TableConstraintDef cursor : tableConstraintDefList)
+	{
+	  if(cursor.getType().equals("PK"))
+	  {
+	    keyAttrs = cursor.getAttrs();
+	    if(!newTable.getPK().isEmpty()) // already exist pk
+	      throw new Exception("Create table has failed: primary key definition is duplicated");
+
+	    for(String strCursor : keyAttrs) // 존재하지 않는 컬럼을 primary key로 정의한 경우
+		{
+		  if(!newTable.containsAttr(strCursor))
+		  	throw new Exception("Create table has failed: '"+ strCursor +"' does not exists in column definition");
+		}
+		
+	    newTable.addPKs(keyAttrs);
+	    newTable.markPKsNotNull();
+	  }
+	  else // "FK" case
+	  {
+	    keyAttrs = cursor.getAttrs();
+	    refTableName = cursor.getRefTableName();
+	    refAttrs = cursor.getRefAttrs();
+
+		DatabaseEntry theKey = null;
+	    try {
+	    	theKey = new DatabaseEntry(refTableName.getBytes("UTF-8"));
+	    } catch (UnsupportedEncodingException e) {
+	    	e.printStackTrace();
+	    }
+        DatabaseEntry theData = new DatabaseEntry();
+        if(!getTableFromDB(theKey, theData)) // not found
+        {
+          throw new Exception("Create table has failed: foreign key references non existing table");
+        }
+        
+   	    Table retrievedTable = (Table) entryBinding.entryToObject(theData);
+   	    
+		ArrayList<Attribute> newTableAttrs = newTable.getAttrs();
+		ArrayList<Attribute> refTableAttrs = retrievedTable.getAttrs();
+		ArrayList<Attribute> newTableFKAttrs = new ArrayList<Attribute>();
+		ArrayList<Attribute> refTableFKAttrs = new ArrayList<Attribute>();
+		ArrayList<String> typeList = new ArrayList<String>();
+
+		for(String strCursor : keyAttrs) // 존재하지 않는 컬럼을 foreign key로 정의한 경우
+		{
+		  if(!newTable.containsAttr(strCursor))
+		  	throw new Exception("Create table has failed: '"+ strCursor +"' does not exists in column definition");
+		}
+		for(String strCursor : refAttrs) 
+		{
+		  if(!retrievedTable.containsAttr(strCursor)) // Foreign key가 존재하지 않는 컬럼을 참조한다면, ReferenceColumnExistenceError에 해당하는 메시지 출력
+		  	throw new Exception("Create table has failed: foreign key references non existing column");
+		  if((!containsCaseInsen(retrievedTable.getPK(), strCursor)) || (retrievedTable.getPK().size() != refAttrs.size())) // Foreign key가 primary key가 아닌 컬럼을 참조한다면, 
+			throw new Exception("Create table has failed: foreign key references non primary key column");
+		}
+
+		// Foreign key의 타입과 foreign key가 참조하는 컬럼의 개수나 타입이 서로 다른 경우,
+		// ReferenceTypeError에 해당하는 메시지 출력
+		for(Attribute attrCursor : newTableAttrs)
+		{
+		  if(containsCaseInsen(keyAttrs, attrCursor.getAttrName()))
+		    newTableFKAttrs.add(attrCursor);
+		}
+		for(Attribute attrCursor : refTableAttrs)
+		{
+		  if(containsCaseInsen(refAttrs, attrCursor.getAttrName()))
+		    refTableFKAttrs.add(attrCursor);
+		}
+	
+		for(Attribute attrCursor : newTableFKAttrs)
+		{
+		  typeList.add(attrCursor.getType());
+		}
+		for(Attribute attrCursor : refTableFKAttrs)
+		{
+		  typeList.remove(attrCursor.getType());
+		}
+	
+		if((keyAttrs.size() != refAttrs.size())||(!typeList.isEmpty())) // number of foreign key col and refed col are different 
+		  throw new Exception("Create table has failed: foreign key references wrong type");	
+
+		for(ForeignKey FKCursor : newTable.getFKs()) // PRJ2 #13 : additional error case. the column references multiple tables
+		{
+		  for(String newAttr : keyAttrs)
+		  {
+			if(containsCaseInsen(FKCursor.getAttrs(), newAttr))
+			  throw new Exception("Create table has failed: the column references multiple tables");
+		  }
+		}
+		
+	    newForeignKey = new ForeignKey(keyAttrs, refTableName, refAttrs);
+	    newTable.addFK(newForeignKey);
+	  }
+	}
+	addAllReferencedBy(newTable.getTableName(), definitionList);
+		
+	return newTable;
+  }
+ 
+}
+
+PARSER_END(SimpleDBMSParser)
+
+///////// SKIP definition /////////////
+
+SKIP : { " " | "\r" | "\t" | "\n" } // to make spaces in a query ignored.
+
+
+///////////// TOKEN definition //////////////
+
+TOKEN : /* Keywords */ //#2 all keywords are defined first. to make keywords don't be recognized as LEGAL_IDENTIFIER
+{
+  < EXIT : "exit" >
+| < INT : "int" >
+| < CHAR : "char" >
+| < DATE : "date" >
+| < CREATE : "create" > //#3 because "create", "table" can not be an identifier, keyword that consists of spaces should be defined like this. To make each word be recognized as keyword independently.
+| < TABLE : "table" >
+//| < CREATE_TABLE : "create table" >	
+//| < CREATE_TABLE : < CREATE > < SPACE > < TABLE > > 
+| < NOT : "not" >
+| < NULL : "null" >
+//| < NOT_NULL : < NOT > " " < NULL > >
+| < NOT_NULL : "not null" >
+| < PRIMARY : "primary" >
+| < FOREIGN : "foreign" >
+| < KEY : "key" >
+//| < PRIMARY_KEY : < PRIMARY > " " < KEY > >
+//| < FOREIGN_KEY : < FOREIGN > " " < KEY > >
+| < PRIMARY_KEY : "primary key" >
+| < FOREIGN_KEY : "foreign key" >
+| < REFERENCES : "references" >
+| < DROP : "drop" >
+//| < DROP_TABLE : < DROP > " " < TABLE > >
+//| < DROP_TABLE : "drop table" >
+| < DESC : "desc" >
+| < SHOW : "show" >
+| < TABLES : "tables" >
+//| < SHOW_TABLES : < SHOW > " " < TABLES > >
+//| < SHOW_TABLES : "show tables" >
+| < SELECT : "select" >
+| < ASTERISK : "*" >
+| < AS : "as" >
+| < FROM : "from" >
+| < WHERE : "where" >
+| < OR : "or" >
+| < AND : "and" >
+| < IS : "is" >
+| < INSERT : "insert" >
+| < INTO : "into" >
+//| < INSERT_INTO : "insert into" >
+| < VALUES : "values" >
+| < DELETE : "delete" >
+//| < DELETE_FROM : "delete from" >
+
+//| < #SPACE : " " >
+
+}
+
+TOKEN :
+{
+  < SEMICOLON : ";" >
+| < LEFT_PAREN : "(" >
+| < RIGHT_PAREN : ")" >
+| < COMMA : "," >
+| < UNDERSCORE : "_" >
+| < INT_VALUE : (< SIGN >)? (< DIGIT >)+>
+| < SIGN : "+" | "-" >
+| < DIGIT : [ "0"-"9" ] >
+| < LEGAL_IDENTIFIER : < ALPHABET > (< ALPHABET > | < UNDERSCORE >)* >
+| < ALPHABET : [ "a"-"z", "A"-"Z" ] >
+| < PERIOD : "." >
+| < COMPARISON_SIGNS : "<" | ">" | "=" | "<=" | ">=" | "!=" > // #5 add inequality signs and equality sign to token 
+| < QUOTE : "'" >
+| < NON_QUOTE_SPECIAL_CHARACTERS : "`"|"~"|"!"|"@"|"#"|"$"|"%"|"^"|"&"|"*"|"("|")"|"-"|"_"|"="|"+"|"["|"]"|"{"|"}"|"\\"|";"|":"|"<"|","|"."|">"|"/"|"?"|"|" >
+| < NON_QUOTE_CHARACTERS : < DIGIT > | < ALPHABET > | < NON_QUOTE_SPECIAL_CHARACTERS > | " " > 
+| < CHAR_STRING : < QUOTE > (< NON_QUOTE_CHARACTERS >)* < QUOTE > >
+| < DATE_VALUE : < NNNN > "-" < NN > "-" < NN > > 
+| < NNNN : < DIGIT > < DIGIT > < DIGIT > < DIGIT > >
+| < NN : < DIGIT > < DIGIT > >
+//| < #SPACE : " " > #6 this line cause error. duplicate with SKIP definition. so use " ", instead of < SPACE >
+
+}
+
+///////////////// Query rules ////////////////
+
+/*
+
+<COMMAND> ::= <QUERY LIST>
+| exit <SEMICOLON>
+<QUERY LIST> ::= (<QUERY> <SEMICOLON>)+
+<QUERY> ::= <CREATE TABLE QUERY>
+| <DROP TABLE QUERY>
+| <DESC QUERY>
+| <SELECT QUERY>
+| <INSERT QUERY>
+| <DELETE QUERY>
+| <SHOW TABLES QUERY>
+<SEMICOLON> ::= ;
+
+*/
+
+void command() :
+{}
+{
+  queryList()
+| (
+    < EXIT >
+    < SEMICOLON >
+    {      
+      /* CLOSING DB */
+	  if (cursor != null) cursor.close();
+	  if (myDatabase != null) myDatabase.close();
+	  if (myDatabase != null) myClassDb.close();
+	  if (myDbEnvironment != null) myDbEnvironment.close();
+	  
+      System.exit(0);
+    }
+  ) 
+}
+
+void queryList() :
+{
+  int q;
+}
+{
+  (
+    q = query()
+    //< SEMICOLON >  PRJ2 #5 : SEMICOLON is relocated because \n can be placed between query implementation and semicolon*/
+    {
+      printMessage(q);
+    }
+  )+
+}
+
+int query() : // #4 Query :<CREATE TABLE QUERY>| <DROP TABLE QUERY>| <DESC QUERY>| <SELECT QUERY>| <INSERT QUERY>| <DELETE QUERY>| <SHOW TABLES QUERY>
+{
+  int q; // used for switch statement.
+}
+{
+  (
+    (
+      createTableQuery()
+      {
+        q = PRINT_CREATE_TABLE;
+      }
+  	)
+  	|
+ 	(
+  	  dropTableQuery()
+  	  {
+  	    q = PRINT_DROP_TABLE;
+ 	  }
+ 	)
+	|
+	(
+	  descQuery()
+	  {
+	    q = PRINT_DESC;
+	  }
+	)
+	|
+	(
+	  showTablesQuery()
+	  {
+	    q = PRINT_SHOW_TABLES;
+	  }
+	)
+	|
+	(
+	  selectQuery()
+	  {
+	    q = PRINT_SELECT;
+	  }
+	)
+	|
+	(
+	  insertQuery()
+	  {
+	    q = PRINT_INSERT;
+	  }
+	)
+	|
+	(
+	  deleteQuery()
+	  {
+	    q = PRINT_DELETE;
+	  }
+	)       
+  )
+  (
+    {
+      return q;
+    }
+  )
+}
+
+/////////// delete rules ///////////
+/*
+
+<DELETE QUERY> ::= delete from <TABLE NAME> [<WHERE CLAUSE>]
+
+*/
+
+void deleteQuery() :
+{}
+{
+  < DELETE >
+  < FROM >
+  tableName()
+  (
+	whereClause()
+  )?
+  < SEMICOLON >
+}
+
+/////////// insert rules ////////////////
+/*
+
+<INSERT QUERY> ::= insert into <TABLE NAME> <INSERT COLUMNS AND SOURCE>
+<INSERT COLUMNS AND SOURCE> ::= [<COLUMN NAME LIST>] <VALUE LIST>
+<VALUE LIST> ::= values <LEFT PAREN> <VALUE> (<COMMA> <VALUE>)* <RIGHT PAREN>
+<VALUE> ::= null
+| <COMPARABLE VALUE>
+
+*/
+void insertQuery() :
+{}
+{
+  < INSERT >
+  < INTO >
+  tableName()
+  insertColumnsAndSource()
+  < SEMICOLON >
+}
+
+void insertColumnsAndSource() :
+{}
+{
+  (
+    columnNameList()
+  )?
+  valueList()
+}
+
+void valueList() :
+{}
+{
+  < VALUES >
+  < LEFT_PAREN >
+  value()
+  (
+	< COMMA >
+	value()
+  )*
+  < RIGHT_PAREN >
+}
+
+void value() :
+{}
+{
+  < NULL >
+| comparableValue()
+}
+
+/////////// select rules /////////////////
+/*
+
+<SELECT QUERY> ::= select <SELECT LIST> <TABLE EXPRESSION>
+<SELECT LIST> ::= *
+| <SELECTED COLUMN> (<COMMA> <SELECTED COLUMN>)*
+<SELECTED COLUMN> ::= [<TABLE NAME> <PERIOD>] <COLUMN NAME> [as <COLUMN NAME>]
+<PERIOD> ::= .
+<TABLE EXPRESSION> ::= <FROM CLAUSE> [<WHERE CLAUSE>]
+<FROM CLAUSE> ::= from <TABLE REFERENCE LIST>
+<TABLE REFERENCE LIST> ::= <REFERED TABLE> (<COMMA> <REFERED TABLE>)*
+<REFERED TABLE> ::= <TABLE NAME> [as <TABLE NAME>]
+<WHERE CLAUSE> ::= where <BOOLEAN VALUE EXPRESSION>
+<BOOLEAN VALUE EXPRESSION> ::= <BOOLEAN TERM> ( or <BOOLEAN TERM>)*
+<BOOLEAN TERM> ::= <BOOLEAN FACTOR>( and <BOOLEAN FACTOR> )*
+<BOOLEAN FACTOR> ::= [not] <BOOLEAN TEST>
+<BOOLEAN TEST> ::= <PREDICATE>
+| <PARENTHESIZED BOOLEAN EXPRESSION>
+<PARENTHESIZED BOOLEAN EXPRESSION> ::= <LEFT PAREN> <BOOLEAN VALUE EXPRESSION> <RIGHT PAREN>
+<PREDICATE> ::= <COMPARISON PREDICATE>
+| <NULL PREDICTE>
+<COMPARISON PREDICATE> ::= <COMP OPERAND> <COMP OP> <COMP OPERAND>
+<COMP OPERAND> ::= <COMPARABLE VALUE>
+| [<TABLE NAME> <PERIOD>] <COLUMN NAME>
+<COMP OP> ::= < | > | = | >= | <= | !=
+<COMPARABLE VALUE> ::= <INT VALUE>
+| <CHAR STRING>
+| <DATE VALUE>
+<NULL PREDICATE> ::= [<TABLE NAME> <PERIOD>] <COLUMN NAME> <NULL OPERATION>
+<NULL OPERATION> ::= is [not] null
+
+*/
+void selectQuery() :
+{}
+{
+  < SELECT >
+  selectList()
+  tableExpression()
+  < SEMICOLON >
+}
+
+void selectList() :
+{}
+{
+  < ASTERISK >
+| (
+    selectedColumn()
+    (
+      < COMMA >
+      selectedColumn()
+    )*
+  )
+}
+
+void selectedColumn() :
+{}
+{
+  (
+    LOOKAHEAD(2) //#7 choice confilict, <LEGAL_IDENTIFIER>.... using LOOKAHEAD, solve this.
+    tableName()
+    < PERIOD >
+  )?
+  columnName()
+  (
+	< AS >
+	columnName()
+  )?
+}
+
+void tableExpression() :
+{}
+{
+  fromClause()
+  (
+    whereClause()
+  )? 
+}
+
+void fromClause() :
+{}
+{
+  < FROM >
+  tableReferenceList()
+}
+
+void tableReferenceList() :
+{}
+{
+  referedTable()
+  (
+	< COMMA >
+	referedTable()
+  )*
+}
+
+void referedTable() :
+{}
+{
+  tableName()
+  (
+	< AS >
+	tableName()
+  )?
+}
+
+void whereClause() :
+{}
+{
+  < WHERE >
+  booleanValueExpression()
+}
+
+void booleanValueExpression() :
+{}
+{
+  booleanTerm()
+  (
+    < OR >
+    booleanTerm()
+  )*
+}
+
+void booleanTerm() :
+{}
+{
+  booleanFactor()
+  (
+    < AND >
+    booleanFactor()
+  )*
+}
+
+void booleanFactor() :
+{}
+{
+  (
+    < NOT >
+  )?
+  booleanTest()
+}
+
+void booleanTest() :
+{}
+{
+  predicate()
+| parenthesizedBooleanExpression()
+
+}
+
+void parenthesizedBooleanExpression() :
+{}
+{
+  < LEFT_PAREN >
+  booleanValueExpression()
+  < RIGHT_PAREN >
+}
+
+void predicate() :
+{}
+{
+  LOOKAHEAD(4) // #8 choice conflict <LEGAL_IDENTIFIER> <PERIOD> ... , to solve this, use LOOKAHEAD(3)
+  comparisonPredicate()
+| nullPredicate()
+}
+
+void comparisonPredicate() :
+{}
+{
+  compOperand()
+  compOp()
+  compOperand()
+}
+
+void compOperand() :
+{}
+{
+  
+  comparableValue()
+| (
+    (
+      LOOKAHEAD(2) //#7
+      tableName()
+      < PERIOD >
+    )?
+    columnName()
+  )
+}
+
+void compOp() :
+{}
+{
+  < COMPARISON_SIGNS >
+}
+
+void comparableValue() :
+{}
+{
+  < INT_VALUE >
+| < CHAR_STRING >
+| < DATE_VALUE >
+
+}
+
+void nullPredicate() :
+{}
+{
+  
+  (
+    LOOKAHEAD(2) //#7
+	tableName()
+	< PERIOD >
+  )?
+  columnName()
+  nullOperation()
+}
+
+void nullOperation() :
+{}
+{
+//  < IS >
+//  (
+//	< NOT >
+//  )?
+//  < NULL >  #9 this definition makes conflict with < NOT_NULL > token. 
+
+  < IS >
+  (
+    < NOT_NULL >
+  | < NULL >
+  )
+}
+
+/////////// show table rules ///////////
+/*
+
+<SHOW TABLES QUERY> ::= show tables
+
+*/
+void showTablesQuery() :
+{}
+{
+  < SHOW >
+  < TABLES >
+  < SEMICOLON >
+  {
+	/* PRJ2 #3 : implementation of show tables */
+
+	if (cursor.getFirst(foundKey, foundData, LockMode.DEFAULT) == OperationStatus.NOTFOUND)
+	{ // empty db case
+	  System.out.println("There is no table");
+	}
+	else
+	{
+	  System.out.println("----------------");
+	  do // traverse entire db
+	  {     
+	    String res_key = null;
+	    try {
+	   			res_key = new String(foundKey.getData(), "UTF-8");
+		} catch (UnsupportedEncodingException e) {
+			e.printStackTrace();
+		}
+	    System.out.println(res_key);
+	  } while (cursor.getNext(foundKey, foundData,LockMode.DEFAULT) == OperationStatus.SUCCESS);
+	  System.out.println("----------------");
+	}
+  }
+}
+
+/////////// desc rules ////////////
+/*
+
+<DESC QUERY> ::= desc <TABLE NAME>
+
+*/
+// PRJ2 #11 : implementation of desc
+void descQuery() :
+{
+  String keyString;
+}
+{
+  < DESC >
+  keyString = tableName()
+  < SEMICOLON >
+  {
+    try { 
+    // get table object from db
+    DatabaseEntry theKey = null;
+	try {
+		theKey = new DatabaseEntry(keyString.getBytes("UTF-8"));
+	} catch (UnsupportedEncodingException e) {
+		e.printStackTrace();
+	}
+    DatabaseEntry theData = new DatabaseEntry();
+    String attrName, attrType, attrNullable;
+    if(!getTableFromDB(theKey, theData)) // not found
+    {
+      System.out.println("No such table");
+    }
+    else // found
+    {     
+      // the EntryBinding created above
+      Table retrievedTable = (Table) entryBinding.entryToObject(theData);
+
+	  System.out.println("-------------------------------------------------");
+	  System.out.println("table_name ["+retrievedTable.getTableName()+"]");
+	  System.out.printf("%-19s%-10s%-10s%-10s\n", "column_name","type","null","key");
+	  
+	  for(Attribute cursor : retrievedTable.getAttrs())
+	  {
+	    attrName = cursor.getAttrName();
+	    attrType = cursor.getType();
+	    if(cursor.getNullable())
+	      attrNullable = "Y";
+	    else
+	      attrNullable = "N";
+	    System.out.printf("%-19s%-10s%-10s%-10s\n", attrName, attrType, attrNullable, whatKey(retrievedTable, attrName));
+	  }
+	
+	  System.out.println("-------------------------------------------------");
+	}
+	} catch (Exception e) { e.printStackTrace(); }
+
+  }
+}
+
+/////////// drop table rules /////////////
+/*
+
+<DROP TABLE QUERY> ::= drop table <TABLE NAME>
+
+*/
+
+// PRJ2 #12 : implementation of drop table
+void dropTableQuery() :
+{
+  String keyString;
+}
+{
+  < DROP >
+  < TABLE >
+  keyString = tableName()
+  < SEMICOLON >
+  {
+	// get table object from db
+    DatabaseEntry theKey = null;
+	try {
+		theKey = new DatabaseEntry(keyString.getBytes("UTF-8"));
+	} catch (UnsupportedEncodingException e) {
+		e.printStackTrace();
+	}
+    DatabaseEntry theData = new DatabaseEntry();
+    if(!getTableFromDB(theKey, theData)) // not found
+    {
+      System.out.println("No such table");
+    }
+    else // found
+    {
+      Table retrievedTable = (Table) entryBinding.entryToObject(theData);
+	  if(retrievedTable.isReferenced())
+	  	System.out.println("Drop table has failed: '"+ keyString +"' is referenced by other table");
+	  else
+	  {
+		deleteReference(retrievedTable); // delete this table from referencedBy list of other referenced table
+		myDatabase.delete(null, theKey);
+		myDatabase.sync();
+		System.out.println("'"+ keyString +"' table is dropped");
+	  }
+    }
+
+  }
+}
+
+/////////// create table rules ///////////////
+/*
+
+<CREATE TABLE QUERY> ::= create table <TABLE NAME> <TABLE ELEMENT LIST>
+<TABLE ELEMENT LIST> ::= <LEFT PAREN> <TABLE ELEMENT> (<COMMA> <TABLE ELEMENT>)* <RIGHT PAREN>
+<TABLE ELEMENT> ::= <COLUMN DEFINITION>
+| <TABLE CONSTRAINT DEFINITION>
+<COLUMN DEFINITION> ::= <COLUMN NAME> <DATA TYPE> [not null]
+<TABLE CONSTRAINT DEFINITION> ::= <PRIMARY KEY CONSTRAINT>
+| <REFERENTIAL CONSTRAINT>
+<PRIMARY KEY CONSTRAINT> ::= primary key <COLUMN NAME LIST>
+<REFERENTIAL CONSTRAINT> ::= foreign key <COLUMN NAME LIST> references <TABLE NAME> <COLUMN NAME LIST>
+<COLUMN NAME LIST> ::= <LEFT PAREN> <COLUMN NAME> (<COMMA> <COLUMN NAME>)* <RIGHT PAREN>
+<DATA TYPE> ::= int
+| char <LEFT PAREN> <INT VALUE> <RIGHT PAREN>
+| date
+<TABLE NAME> ::= <LEGAL IDENTIFIER>
+<COLUMN NAME> ::= <LEGAL IDENTIFIER>
+<LEGAL IDENTIFIERS> ::= <ALPHABET> (<ALPHABET> | <UNDERSCORE>)*
+<UNDERSCORE> ::= _
+<LEFT PAREN> ::= (
+<RIGHT PAREN> ::= )
+<COMMA> ::= ,
+
+*/
+void createTableQuery() :
+{
+  String tableNameString;
+  TableElementList definitionList;
+  Table newTable = new Table();
+}
+{
+  < CREATE >
+  < TABLE >
+  tableNameString = tableName()
+  definitionList = tableElementList()
+  < SEMICOLON >
+  {
+    try {
+	if(tableExist(tableNameString))
+	  throw new Exception("Create table has failed: table with the same name already exists");
+      
+	newTable.setTableName(tableNameString);
+	newTable = makeColumns(newTable, definitionList);
+	newTable = applyConstraints(newTable, definitionList);
+    
+	putObjectEntry(tableNameString,newTable);
+
+	System.out.println("'"+ tableNameString +"' table is created");
+	}
+	catch (Exception e)
+	{
+		System.out.println(e.getMessage());
+		SimpleDBMSParser.ReInit(System.in);
+	}
+  }
+}
+
+TableElementList tableElementList() :
+{
+  TableElementList definitionList = new TableElementList();
+}
+{
+  < LEFT_PAREN >
+  definitionList = tableElement(definitionList)
+  (
+    < COMMA >
+    definitionList = tableElement(definitionList)
+  )*
+  < RIGHT_PAREN >
+  {
+	return definitionList;
+  }
+}
+
+TableElementList tableElement(TableElementList definitionList) :
+{
+}
+{
+(   
+  definitionList = columnDefinition(definitionList)
+| definitionList = tableConstraintDefinition(definitionList)
+)
+{
+  return definitionList;
+}
+}
+
+TableElementList columnDefinition(TableElementList definitionList) :
+{
+  String colName;
+  String type;
+  Token notNull = null;
+  ColumnDef newDef;
+}
+{
+(
+  colName = columnName()
+  type = dataType()
+  (
+    notNull = < NOT_NULL >
+  )?
+)
+  {
+   	newDef = new ColumnDef(colName, type, (notNull==null));
+    definitionList.addColumnDef(newDef);
+	return definitionList;
+  }
+}
+
+TableElementList tableConstraintDefinition(TableElementList definitionList) :
+{
+}
+{
+(
+  definitionList = primaryKeyConstraint(definitionList)
+| definitionList = referentialConstraint(definitionList)
+)
+  {
+    return definitionList;
+  }
+}
+
+TableElementList primaryKeyConstraint(TableElementList definitionList) :
+{
+  ArrayList<String> columnList;
+  TableConstraintDef newDef;
+}
+{
+  < PRIMARY_KEY >
+  columnList = columnNameList()
+  {
+	newDef = new TableConstraintDef("PK", columnList);
+	definitionList.addTableConstraintDef(newDef);
+	return definitionList;
+  }
+}
+
+TableElementList referentialConstraint(TableElementList definitionList) :
+{
+  ArrayList<String> columnList, refColumnList;
+  String refTableName;
+  TableConstraintDef newDef;
+}
+{
+  < FOREIGN_KEY >
+  columnList = columnNameList() 
+  < REFERENCES >
+  refTableName = tableName()
+  refColumnList = columnNameList()
+  {
+	newDef = new TableConstraintDef("FK", columnList, refTableName, refColumnList);
+	definitionList.addTableConstraintDef(newDef);
+	return definitionList;
+  }
+}
+
+ArrayList<String> columnNameList() :
+{
+  ArrayList<String> result = new ArrayList<String>();
+  String temp;
+}
+{
+  < LEFT_PAREN >
+  temp = columnName()
+  {
+	result.add(temp);
+  }
+  (
+    < COMMA >
+    temp = columnName()
+    {
+      result.add(temp);
+    }
+  )*
+  < RIGHT_PAREN >
+  {
+	return result;
+  }
+}
+
+String dataType() :
+{
+  String result;
+  Token type = null;
+  Token charType = null,lp = null,rp = null,value = null;
+}
+{
+   (    type = < INT >
+| (
+    charType = < CHAR >
+    lp = < LEFT_PAREN >
+    value = < INT_VALUE >
+    rp = < RIGHT_PAREN >
+  )
+| type = < DATE >
+
+)
+ {
+    if (type == null)
+    {
+      if(Integer.parseInt(value.image) < 1)
+      	result = "errorType";
+      else
+	    result = charType.image+lp.image+value.image+rp.image;
+	}
+	else result = type.image;
+	return result;
+ }
+}
+
+
+
+String tableName() :
+{
+  Token result;
+}
+{
+  result = < LEGAL_IDENTIFIER >
+  {
+	return result.image; // PRJ2 #8 : technique that return string
+  }
+}
+
+String columnName() :
+{
+  Token result;
+}
+{
+  result = < LEGAL_IDENTIFIER >
+  {
+	return result.image;
+  }
+}
